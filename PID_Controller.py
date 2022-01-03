@@ -1,5 +1,5 @@
 import numpy as np
-import matplotlib as plt 
+import matplotlib.pyplot as plt
 import time
 import warnings
 #########################################################################################
@@ -55,7 +55,7 @@ class PID(object):
     Derivative term:   By derivative errors, the vibration of response is reduced.
     """
     def __init__(self, Kp = 1.0, Ki = 0.0, Kd = 0.0, set_point = 0.0, sample_time = 0.01, 
-                 output_limits = (None, None), auto_mode = True, proportional_on_measurement = False, error_map = None):
+                 output_limits = (None, None), proportional_on_measurement = False):
         
         """
         Initialize a new PID controller.
@@ -109,12 +109,16 @@ class PID(object):
         self.last_feedback_value = 0.0
 
         # Timing
+        self.start_time = time.monotonic()
         self.now_time = time.monotonic()
         self.old_time = self.now_time
 
-        self.auto_mode = auto_mode
         self.proportional_on_measurement = proportional_on_measurement
-        self.error_map = error_map
+
+        # !
+        self.set_point_array, self.feedback_value_array, self.time_duration_array = [], [], []
+
+        self.reset()
     
     def reset(self):
         """
@@ -124,10 +128,10 @@ class PID(object):
         """
 
         self.P_term, self.I_term, self.D_term = 0.0, 0.0, 0.0
-        
+        self.I_term = clamp(value=self.I_term, limits=self.output_limits)
         self.old_time = time.monotonic()
-        self.last_output = None
-        self.last_feedback_value = None
+        self.last_output = 0.0
+        self.last_feedback_value = 0.0
 
     def set_sample_time(self, sample_time):
         """
@@ -153,10 +157,6 @@ class PID(object):
             the derivative of the error (since the error changes instantly when
             switching the set point, its derivative ends up being infinite).   
         """
-
-        if (not self.auto_mode):
-            return self.last_output
-
         # Get elapsed time. Get monotonic time to ensure that time deltas are always positive
         self.now_time = time.monotonic()
         if (dt is None):
@@ -204,6 +204,11 @@ class PID(object):
         self.output = self.P_term + self.I_term + self.D_term
         self.output = clamp(value=self.output, limits=self.output_limits)
 
+        # Arrays for Visualization of Output Results
+        self.time_duration_array += [self.now_time - self.start_time]
+        self.feedback_value_array += [feedback_value]
+        self.set_point_array += [self.set_point]
+
         # Keep track of state. Remember last time and last error for next calculation. Update variables
         self.old_time = self.now_time
         self.last_error = self.current_error
@@ -212,6 +217,13 @@ class PID(object):
 
         return self.output
     
+    def show_response(self):
+        plt.plot(self.time_duration_array, self.set_point_array, label = 'Set Point')
+        plt.plot(self.time_duration_array, self.feedback_value_array, label = 'PID Controller')
+        plt.xlabel('Time')
+        plt.ylabel("System")
+        plt.pause(self.sample_time)
+
     # RETURNING VALUE FUNCTIONS
     def get_info(self, get_error = False, get_I_term = False, get_D_term = False):
         if (get_error == True):
@@ -245,16 +257,6 @@ class PID(object):
         self.Kd = derivative_gain
 
     @property
-    def auto_mode(self):
-        # Whether the controller is currently enabled (in auto mode) or not
-        return self.auto_mode
-    
-    @auto_mode.setter
-    def auto_mode(self, enabled):
-        # Enable or disable the PID controller
-        self.set_auto_mode(enabled)
-    
-    @property
     def output_limits(self):
         # The current output limits as a 2-tuple: (lower, upper)
         return self.min_output, self.max_output
@@ -264,6 +266,7 @@ class PID(object):
         # Set the output limit
         if (limits is None):
             self.min_output, self.max_output = None, None
+            return
 
         min_output, max_output = limits
         
@@ -274,7 +277,7 @@ class PID(object):
         self.max_output = max_output
 
         self.I_term = clamp(value=self.I_term, limits=self.output_limits)
-        self.last_output = clamp(value=self.last_output, limits=self.output_limits)
+        # self.last_output = clamp(value=self.last_output, limits=self.output_limits)
 #########################################################################################
 # Example Heating a room
 class Heater:
@@ -300,17 +303,14 @@ def main():
     # Write the created model into the main function
     my_heater = Heater()
     temp = my_heater.temp
+    sample_time = 0.01
 
     # Set the 03 parameters of PID and limit output
-    my_PID = PID(Kp=2, Ki=0.01, Kd=0.1, set_point=temp)
-    my_PID.output_limits = (0, None)
+    my_PID = PID(Kp=2, Ki=0.01, Kd=0.1, set_point=temp, output_limits=(0, None), sample_time=sample_time)
 
     # Used to set time parameters
     start_time = time.time()
     last_time = start_time
-
-    # Visualize Output's results
-    set_point, y, x = [], [], []
 
     # Set System Runtime
     while (time.time() - start_time < 10):
@@ -323,27 +323,20 @@ def main():
         The difference between the variable `temp` and the ideal value is used as the input
             in the feedback loop to adjust the change of the variable `power`
         """
-        power = my_PID(temp)
+        power = my_PID.update(feedback_value=temp)
         temp = my_heater.update(power=power, dt=dt)
-
-        # Visualize Output Results
-        x += [current_time - start_time]
-        y += [temp]
-        set_point += [my_PID.set_point]
 
         # Used for initial value assignment of variable `temp`
         if (current_time - start_time > 0):
             my_PID.set_point = 100
         
         last_time = current_time
-    
-    # Visualization of Output Results
-    plt.plot(x, set_point, label = 'Set Point')
-    plt.plot(x, y, label = 'PID Controller')
-    plt.xlabel('Time')
-    plt.ylabel('Temperature')
-    plt.legend()
-    plt.show()
 
+        # Visualization of Output Results
+        my_PID.show_response()
+
+    plt.show() # For reviewing the plot after `while True`
+    
+    
 if (__name__ == '__main__'):
     main()
