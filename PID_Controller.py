@@ -38,10 +38,16 @@ def clamp(value, limits):
     return value
 
 #########################################################################################
+class Constants:
+    MANUAL = 0
+    AUTOMATIC = 1
+
+    DIRECT = 1
+    REVERSE = -1
+
 class PID(object):
     """
     PID controller with integral-windup & derivative-kick prevention and bumpless
-        manual-to-auto-mode transfer
 
     Simple implementation of a PID controller for a closed loop control system.
         As of self.now_time by setting either Ki or Kd equal to zero you can use, respectively
@@ -54,8 +60,9 @@ class PID(object):
     Integral term:     Accumulate errors to make the output closer to target. 
     Derivative term:   By derivative errors, the vibration of response is reduced.
     """
-    def __init__(self, Kp = 1.0, Ki = 0.0, Kd = 0.0, set_point = 0.0, sample_time = 0.01, 
-                 output_limits = (None, None), proportional_on_measurement = False):
+    def __init__(self, Kp = 1.0, Ki = 0.0, Kd = 0.0, set_point = 0.0, sample_time = 0.01, now_time = None, 
+                 output_limits = (None, None), proportional_on_measurement = False,
+                 direction = Constants.DIRECT):
         
         """
         Initialize a new PID controller.
@@ -73,7 +80,6 @@ class PID(object):
             or above the upper limit. Either of the limits can also be set to None to have no limit
             in that direction. Setting output limits also avoids integral windup, since the
             integral term will never be allowed to grow outside of the limits.
-        :param auto_mode: Whether the controller should be enabled (auto mode) or not (manual mode)
         :param proportional_on_measurement: Whether the proportional term should be calculated on
             the input directly rather than on the error (which is the traditional way). Using
             proportional-on-measurement avoids overshoot for some types of systems.
@@ -88,12 +94,16 @@ class PID(object):
         # PID terms
         self.P_term, self.I_term, self.D_term = 0.0, 0.0, 0.0
 
+        self.direction = direction
+
         # Set point is set to zero by default
         self.set_point = set_point
 
-        # Sampling time
+        # Timing
         self.sample_time = sample_time
-        self.old_time = None
+        self.now_time = now_time if (now_time is not None) else time.monotonic()
+        self.start_time = self.now_time
+        self.old_time = self.now_time
 
         self.current_error, self.last_error, self.integral_error, self.derivative_error = 0.0, 0.0, 0.0, 0.0
 
@@ -108,14 +118,8 @@ class PID(object):
         # Last y measured
         self.last_feedback_value = 0.0
 
-        # Timing
-        self.start_time = time.monotonic()
-        self.now_time = time.monotonic()
-        self.old_time = self.now_time
-
         self.proportional_on_measurement = proportional_on_measurement
 
-        # !
         self.set_point_array, self.feedback_value_array, self.time_duration_array = [], [], []
 
         self.reset()
@@ -129,6 +133,7 @@ class PID(object):
 
         self.P_term, self.I_term, self.D_term = 0.0, 0.0, 0.0
         self.I_term = clamp(value=self.I_term, limits=self.output_limits)
+        self.last_error = 0.0
         self.old_time = time.monotonic()
         self.last_output = 0.0
         self.last_feedback_value = 0.0
@@ -140,9 +145,12 @@ class PID(object):
         """
         self.sample_time = sample_time
 
-    def update(self, feedback_value, dt = None):
+    def update(self, feedback_value, now_time = None, dt = None):
 
         """
+            Compute new PID output. This function should be called repeatedly,
+        preferably at a fixed time interval.
+        
             Update the PID controller. Calculates PID value for given reference feedback
         Call the PID controller with *feedback_value* and calculate and return a control output if
         sample_time seconds has passed since the last update. If no new output is calculated,
@@ -158,7 +166,7 @@ class PID(object):
             switching the set point, its derivative ends up being infinite).   
         """
         # Get elapsed time. Get monotonic time to ensure that time deltas are always positive
-        self.now_time = time.monotonic()
+        self.now_time = now_time if (now_time is not None) else time.monotonic()
         if (dt is None):
             dt = (self.now_time - self.old_time) if (self.now_time > self.old_time) else 1e-16
         elif (dt <= 0):
@@ -178,14 +186,14 @@ class PID(object):
             # Compute the proportional term 
             if (not self.proportional_on_measurement):
                 # Regular proportional-on-error, simply set the proportional term
-                self.P_term = self.Kp * self.current_error
+                self.P_term = self.Kp * self.current_error * self.direction
             else:
                 # Add the proportional error on measurement to error_sum
-                self.P_term += self.Kp * delta_feedback_value
+                self.P_term += self.Kp * delta_feedback_value * self.direction
             
             # Compute the integral term. Add the error with respect to time
             self.integral_error = self.current_error * delta_time 
-            self.I_term += self.Ki * self.integral_error
+            self.I_term += self.Ki * self.integral_error * self.direction
             """ Avoid integral windup. Prevents the I-Controller from diverging
             Integral (reset) windup, the situation where a large change in setpoint  
             occurs (positive change) and the integral terms accumulates a significant 
@@ -196,9 +204,11 @@ class PID(object):
             self.I_term = clamp(value=self.I_term, limits=self.output_limits)
 
             # Compute the derivative term
-            delta_error = self.last_error - self.current_error
+            delta_error = self.current_error - self.last_error
             self.derivative_error = delta_feedback_value / delta_time # The change of error over time
-            self.D_term = self.Kd * self.derivative_error
+            # self.D_term = self.Kd * self.derivative_error * self.direction
+            self.D_term = self.Kd * delta_error * self.direction
+
         
         # Compute final output
         self.output = self.P_term + self.I_term + self.D_term
@@ -217,15 +227,17 @@ class PID(object):
 
         return self.output
     
-    def show_response(self):
+    def show_response(self, controlled_value_name = "System's Response"):
         plt.plot(self.time_duration_array, self.set_point_array, label = 'Set Point')
         plt.plot(self.time_duration_array, self.feedback_value_array, label = 'PID Controller')
         plt.xlabel('Time')
-        plt.ylabel("System")
+        plt.ylabel(controlled_value_name)
         plt.pause(self.sample_time)
 
     # RETURNING VALUE FUNCTIONS
-    def get_info(self, get_error = False, get_I_term = False, get_D_term = False):
+    def get_info(self, get_error = False, get_P_term = False, get_I_term = False, get_D_term = False):
+        if (get_P_term == True):
+            return self.P_term
         if (get_error == True):
             return self.error
         if (get_I_term == True):
@@ -305,38 +317,37 @@ def main():
     temp = my_heater.temp
     sample_time = 0.01
 
-    # Set the 03 parameters of PID and limit output
-    my_PID = PID(Kp=2, Ki=0.01, Kd=0.1, set_point=temp, output_limits=(0, None), sample_time=sample_time)
-
     # Used to set time parameters
-    start_time = time.time()
+    start_time = time.monotonic()
     last_time = start_time
 
+    # Set the 03 parameters of PID and limit output
+    my_PID = PID(Kp=2, Ki=0.1, Kd=0.01, set_point=temp, output_limits=(0, 200), now_time = start_time , sample_time=sample_time, direction=Constants.DIRECT)
+
     # Set System Runtime
-    while (time.time() - start_time < 10):
+    while (time.monotonic() - start_time < 10):
         # Setting the time variable `dt`
-        current_time = time.time()
-        dt = current_time - last_time
+        now_time = time.monotonic()
+        dt = now_time - last_time
+
+        # Used for initial value assignment of variable `temp`
+        if (now_time - start_time > 0):
+            my_PID.set_point = 100
 
         """
         The variable `temp` is used as the output in the whole system
         The difference between the variable `temp` and the ideal value is used as the input
             in the feedback loop to adjust the change of the variable `power`
         """
-        power = my_PID.update(feedback_value=temp)
+        power = my_PID.update(feedback_value=temp, now_time=now_time)
         temp = my_heater.update(power=power, dt=dt)
-
-        # Used for initial value assignment of variable `temp`
-        if (current_time - start_time > 0):
-            my_PID.set_point = 100
         
-        last_time = current_time
+        last_time = now_time
 
         # Visualization of Output Results
-        my_PID.show_response()
+        my_PID.show_response(controlled_value_name='Temperature')
 
     plt.show() # For reviewing the plot after `while True`
-    
     
 if (__name__ == '__main__'):
     main()
